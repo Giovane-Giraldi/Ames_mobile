@@ -1,22 +1,34 @@
 package projeto.interdiciplinar.ames.viewmodel
 
-import android.app.Application
 import androidx.compose.runtime.*
-import androidx.lifecycle.AndroidViewModel
-import projeto.interdiciplinar.ames.model.Atividade
-import projeto.interdiciplinar.ames.repository.AtividadeRepository
+import androidx.lifecycle.ViewModel
+import androidx.lifecycle.viewModelScope
+import java.io.IOException
 import java.text.Normalizer
-import java.text.SimpleDateFormat
 import java.util.Locale
+import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.Job
+import kotlinx.coroutines.launch
+import projeto.interdiciplinar.ames.data.Sessao
+import projeto.interdiciplinar.ames.model.Atividade
+import projeto.interdiciplinar.ames.model.AtividadeEnvio
+import projeto.interdiciplinar.ames.repository.AtividadeApiRepository
 
-class AtividadeViewModel(
-    application: Application
-) : AndroidViewModel(application) {
+class AtividadeViewModel : ViewModel() {
 
-    private val repository =
-        AtividadeRepository(application)
+    var atividades by mutableStateOf<List<Atividade>>(emptyList())
+        private set
 
-    var atividades by mutableStateOf(repository.listar())
+    var ocupado by mutableStateOf(false)
+        private set
+
+    var mensagem by mutableStateOf<String?>(null)
+        private set
+
+    var erro by mutableStateOf(false)
+        private set
+
+    var cadastroConcluido by mutableStateOf(false)
         private set
 
     var busca by mutableStateOf("")
@@ -24,6 +36,9 @@ class AtividadeViewModel(
 
     var categoriaFiltro by mutableStateOf("Todos os tipos")
         private set
+
+    private var trabalho: Job? = null
+    private var geracao = 0
 
     val categorias = listOf(
         "Tarefa doméstica",
@@ -36,30 +51,26 @@ class AtividadeViewModel(
         get() = atividades.size
 
     val totalPendentes: Int
-        get() = atividades.count {
-            it.status == "pendente"
-        }
+        get() = atividades.count { it.status == "pendente" }
 
     val totalConcluidas: Int
-        get() = atividades.count {
-            it.status == "concluida"
-        }
+        get() = atividades.count { it.status == "concluida" }
 
     val atividadesFiltradas: List<Atividade>
-        get() = atividades.filter { atividade ->
-
+        get() {
             val termo = normalizar(busca)
 
-            val correspondeTexto =
-                normalizar(atividade.titulo).contains(termo) ||
-                        normalizar(atividade.descricao).contains(termo)
+            return atividades.filter { atividade ->
+                val correspondeTexto =
+                    normalizar(atividade.titulo).contains(termo) ||
+                            normalizar(atividade.descricao).contains(termo)
 
-            val correspondeCategoria =
-                categoriaFiltro == "Todos os tipos" ||
-                        normalizar(atividade.categoria) ==
-                        normalizar(categoriaFiltro)
+                val correspondeCategoria =
+                    categoriaFiltro == "Todos os tipos" ||
+                            atividade.categoria == categoriaFiltro
 
-            correspondeTexto && correspondeCategoria
+                correspondeTexto && correspondeCategoria
+            }
         }
 
     val pendentes: List<Atividade>
@@ -80,6 +91,12 @@ class AtividadeViewModel(
         categoriaFiltro = categoria
     }
 
+    fun listar() {
+        executar {
+            atividades = AtividadeApiRepository.listar()
+        }
+    }
+
     fun cadastrar(
         titulo: String,
         descricao: String,
@@ -87,47 +104,35 @@ class AtividadeViewModel(
         inicio: String,
         fim: String,
         endereco: String
-    ): String {
+    ) {
+        if (ocupado) return
+
+        cadastroConcluido = false
 
         if (titulo.isBlank() || categoria !in categorias) {
-            return "Erro: informe o título e uma categoria."
+            erro = true
+            mensagem = "Informe o título e uma categoria válida."
+            return
         }
 
-        if (titulo.length > 150 || descricao.length > 500) {
-            return "Erro: título ou descrição muito longos."
+        executar {
+            val nova = AtividadeApiRepository.cadastrar(
+                AtividadeEnvio(
+                    titulo = titulo.trim(),
+                    descricao = descricao.trim(),
+                    categoria = categoria,
+                    dataInicio = inicio.trim(),
+                    dataFim = fim.trim(),
+                    endereco = endereco.trim()
+                )
+            )
+
+            atividades = (atividades + nova)
+                .sortedByDescending { it.dataCriacao }
+
+            mensagem = "Atividade cadastrada com sucesso!"
+            cadastroConcluido = true
         }
-
-        if (endereco.length > 255) {
-            return "Erro: endereço muito longo."
-        }
-
-        val dataInicio = analisarData(inicio)
-        val dataFim = analisarData(fim)
-
-        if ((inicio.isNotBlank() && dataInicio == null) ||
-            (fim.isNotBlank() && dataFim == null)
-        ) {
-            return "Erro: data inválida. Use dd/MM/aaaa HH:mm."
-        }
-
-        if (dataInicio != null && dataFim != null &&
-            dataFim < dataInicio
-        ) {
-            return "Erro: término anterior ao início."
-        }
-
-        val novaAtividade = Atividade(
-            titulo = titulo.trim(),
-            descricao = descricao.trim(),
-            categoria = categoria,
-            dataInicio = inicio.trim(),
-            dataFim = fim.trim(),
-            endereco = endereco.trim()
-        )
-
-        salvarLista(atividades + novaAtividade)
-
-        return "Atividade cadastrada com sucesso!"
     }
 
     fun concluir(id: String) {
@@ -138,35 +143,90 @@ class AtividadeViewModel(
         atualizarStatus(id, "pendente")
     }
 
-    private fun atualizarStatus(
-        id: String,
-        novoStatus: String
-    ) {
-        salvarLista(
-            atividades.map { atividade ->
-                if (atividade.id == id) {
-                    atividade.copy(status = novoStatus)
-                } else {
-                    atividade
-                }
+    private fun atualizarStatus(id: String, status: String) {
+        executar {
+            val atualizada =
+                AtividadeApiRepository.atualizarStatus(id, status)
+
+            atividades = atividades.map {
+                if (it.id == id) atualizada else it
             }
-        )
+
+            mensagem = if (status == "concluida") {
+                "Atividade concluída!"
+            } else {
+                "Atividade reaberta!"
+            }
+        }
     }
 
     fun excluir(id: String) {
-        salvarLista(
-            atividades.filterNot {
-                it.id == id
-            }
-        )
+        executar {
+            AtividadeApiRepository.excluir(id)
+
+            atividades = atividades.filterNot { it.id == id }
+            mensagem = "Atividade excluída com sucesso!"
+        }
     }
 
-    private fun salvarLista(lista: List<Atividade>) {
-        atividades = lista.sortedByDescending {
-            it.dataCriacao
-        }
+    fun consumirCadastro() {
+        cadastroConcluido = false
+    }
 
-        repository.salvar(atividades)
+    fun limparMensagem() {
+        mensagem = null
+        erro = false
+    }
+
+    fun limpar() {
+        geracao++
+        trabalho?.cancel()
+        trabalho = null
+
+        atividades = emptyList()
+        ocupado = false
+        mensagem = null
+        erro = false
+        cadastroConcluido = false
+        busca = ""
+        categoriaFiltro = "Todos os tipos"
+    }
+
+    private fun executar(acao: suspend () -> Unit) {
+        if (ocupado) return
+
+        val geracaoAtual = geracao
+
+        ocupado = true
+        mensagem = null
+        erro = false
+
+        trabalho = viewModelScope.launch {
+            try {
+                acao()
+            } catch (e: CancellationException) {
+                throw e
+            } catch (e: IOException) {
+                if (geracaoAtual == geracao) {
+                    erro = true
+                    mensagem = "Não foi possível conectar à API."
+                }
+            } catch (e: Exception) {
+                if (geracaoAtual == geracao) {
+                    if (Sessao.token == null) {
+                        atividades = emptyList()
+                    }
+
+                    erro = true
+                    mensagem = e.message
+                        ?: "Não foi possível concluir a operação."
+                }
+            } finally {
+                if (geracaoAtual == geracao) {
+                    ocupado = false
+                }
+            }
+        }
     }
 
     private fun normalizar(texto: String): String {
@@ -174,22 +234,5 @@ class AtividadeViewModel(
             texto.lowercase(Locale.ROOT),
             Normalizer.Form.NFD
         ).replace(Regex("\\p{Mn}+"), "").trim()
-    }
-
-    private fun analisarData(texto: String): Long? {
-        if (texto.isBlank()) return null
-
-        return try {
-            val formato = SimpleDateFormat(
-                "dd/MM/yyyy HH:mm",
-                Locale("pt", "BR")
-            )
-
-            formato.isLenient = false
-
-            formato.parse(texto.trim())?.time
-        } catch (e: Exception) {
-            null
-        }
     }
 }
