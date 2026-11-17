@@ -37,6 +37,24 @@ fun ActivitiesScreen(
     var mensagem by rememberSaveable { mutableStateOf("") }
 
     var excluirId by remember { mutableStateOf<String?>(null) }
+    LaunchedEffect(vm.mensagem) {
+        mensagem = vm.mensagem?.let {
+            if (vm.erro) "Erro: $it" else it
+        } ?: ""
+    }
+
+    LaunchedEffect(vm.cadastroConcluido) {
+        if (vm.cadastroConcluido) {
+            titulo = ""
+            descricao = ""
+            inicio = ""
+            fim = ""
+            endereco = ""
+
+            vm.consumirCadastro()
+        }
+    }
+
 
     if (excluirId != null) {
         AlertDialog(
@@ -47,7 +65,6 @@ fun ActivitiesScreen(
                 TextButton(onClick = {
                     excluirId?.let { vm.excluir(it) }
                     excluirId = null
-                    mensagem = "Atividade excluída com sucesso!"
                 }) {
                     Text("Excluir", color = Vermelho)
                 }
@@ -180,18 +197,10 @@ fun ActivitiesScreen(
 
                         Button(
                             onClick = {
-                                mensagem = vm.cadastrar(
+                                vm.cadastrar(
                                     titulo, descricao, categoria,
                                     inicio, fim, endereco
                                 )
-
-                                if (!mensagem.startsWith("Erro")) {
-                                    titulo = ""
-                                    descricao = ""
-                                    inicio = ""
-                                    fim = ""
-                                    endereco = ""
-                                }
                             },
                             colors = ButtonDefaults.buttonColors(
                                 containerColor = AzulEscuro
